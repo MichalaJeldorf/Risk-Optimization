@@ -1,0 +1,162 @@
+from gurobipy import *
+import numpy as np
+import pandas as pd
+from scipy.stats import truncnorm
+import heapq
+import matplotlib.pyplot as plt
+import openpyxl
+import os
+#find current working directory: print(os.getcwd())
+np.random.seed(42)
+
+m = Model("example_model")
+
+I = 20
+J = 30
+K = 80 #number of samples of points from each \xsi_j distribution (PDF).
+n = 2 #number in M, F, D
+
+alpha_possibilities = [0.9, 0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99]
+
+objectfunctions_for_all_alpha = []
+for h in range(len(alpha_possibilities)):
+
+    M = [12.5, 17.5, 15, 15, 15, 15, 15, 15, 15, 15]
+    M = [i * J for i in M]
+    F = [500, 500, 250, 500, 750, 1000, 500, 500, 500, 500]
+    F = [i * J for i in F]
+    D = [270, 270, 270, 270, 270, 270, 240, 300, 330, 210]
+
+    alpha = [alpha_possibilities[h]]*I #must have len = I
+
+    x = m.addVars(I,vtype=GRB.BINARY, name = "x")
+
+    y = m.addVars(I, J, vtype=GRB.BINARY, name = "y")
+
+    loc_demand = [(int(np.random.uniform(0, 100)), int(np.random.uniform(0, 100))) for _ in range(J)]
+
+    m.update()
+
+    ### constraint 1 (for every i,j)
+    for i in range(I):
+        for j in range(J):
+            m.addConstr(y[i, j] <= x[i], name=f"c1_{i}_{j}")
+
+    ### constraint 2 (for every j)
+    for j in range(J):
+        sumy_per_j = quicksum(y[i, j] for i in range(I))
+        m.addConstr(sumy_per_j == 1, name=f"c2_{j}")
+
+    ### contraint 3 (individual chance constraint)
+    mu = {}
+    ratio = {}
+    sigma = {}
+    a = {}
+    b = {}
+    xsi = {}
+    lower = {}
+    upper = {}
+    C = {}
+
+    xsi_samples = [] #list of J list with K samples in each list
+    for j in range(J):
+        mu[j] = np.random.uniform(10, 50)
+        ratio[j] = np.random.uniform(0.05, 0.35)
+        sigma[j] = mu[j] * ratio[j]
+        lower[j] = mu[j] - 5
+        upper[j] = mu[j] + 5
+        a[j] = (lower[j] - mu[j]) / sigma[j] #a,b standardized truncation points
+        b[j] = (upper[j] - mu[j]) / sigma[j]
+        xsi[j] = truncnorm(a[j], b[j], loc=mu[j], scale=sigma[j]) #distribution
+        xsi_samples.append(xsi[j].rvs(size=K)) #sample K points from each distribution xsi_j (rvs=>samples from pdf)
+
+    #page 4 lecnotes 3
+    z = m.addVars(I, K, vtype=GRB.BINARY, name="z") #doesnt depend on j, since we sum over \xsi_j
+    #used in the chance constraint to control whether the demand for each facility is met for each sample
+
+    M_i_k = 1e6 #M_i_k should be greater or equal to the y_ij that maximises lhs - M[2]*x[i]
+    #Choose M_i_k great enough to effectively deactivate the constraint when zik=0 but not so large as to cause numerical instability or inefficiency in the solver.
+    for i in range(I):
+        for k in range(K):
+            lhs_a = quicksum(xsi_samples[j][k]*y[i, j] for j in range(J))
+            m.addConstr(lhs_a <= M[n]*x[i] + M_i_k*(1 - z[i, k]), name=f"c3a_{i}_{k}")
+
+    pi = 1/K #we assume the K samples of j all have same probability of happening (uniform probability of each sample)
+    #maybe change pi?
+
+    for i in range(I):
+        lhs_b = quicksum(pi * z[i, k] for k in range(K))
+        m.addConstr(lhs_b >= alpha[i], name=f"c3b_{i}")
+
+    largest_keys = heapq.nlargest(3, mu, key=mu.get)
+
+    largest_3_loc_demand = [loc_demand[i] for i in largest_keys]
+
+    loc_facility_near_high_mu = []
+    for k in range(len(largest_3_loc_demand)):
+        high_first_coordinate = largest_3_loc_demand[k][0] + 5
+        low_first_coordinate = largest_3_loc_demand[k][0] - 5
+        high_second_coordinate = largest_3_loc_demand[k][1] + 5
+        low_second_coordinate = largest_3_loc_demand[k][1] - 5
+        loc_facility_near_high_mu += [(int(np.random.uniform(low_first_coordinate, high_first_coordinate)),
+                                      int(np.random.uniform(low_second_coordinate, high_second_coordinate)))]
+
+    loc_facility_the_rest = []
+    for k in range(I-3):
+        loc_facility_the_rest += [(int(np.random.uniform(20, 80)),
+                                  int(np.random.uniform(20, 80)))]
+
+    loc_facility = loc_facility_near_high_mu + loc_facility_the_rest
+
+    norm = []
+    for i in range(I):
+        for j in range(J):
+            dist = np.sqrt((loc_demand[j][1] - loc_demand[j][0])**2 + (loc_facility[i][1]-loc_facility[i][0])**2)
+            norm.append(int(dist))
+    C = [i*D[n] for i in norm]
+
+    Fx = quicksum(F[n] * x[i] for i in range(I))
+    Cy = quicksum(C[i * J + j] * y[i, j] for i in range(I) for j in range(J))
+
+    objective_function = Fx + Cy
+
+    m.setObjective(objective_function, GRB.MINIMIZE)
+
+    m.update() #adding the stuff to the model
+
+    m.optimize() #solving the model
+
+    print('Objective value: %g' % m.objVal) #objective value
+
+    objectfunctions_for_all_alpha.append(m.objVal)
+
+    m.write("model.lp") #printing the model in a readable way. File arrives at /Users/michalajeldorf/Desktop/RiskOptimization
+
+    x_results = []
+    y_results = []
+
+    x_values = {f"x[{i}]": x[i].X for i in range(I)}
+    x_values['alpha'] = alpha_possibilities[h]
+    x_results.append(x_values)
+
+    # Save y[i, j] values
+    for i in range(I):
+        for j in range(J):
+            y_results.append({
+                'alpha': alpha_possibilities[h],
+                'i': i,
+                'j': j,
+                'y[i,j]': y[i, j].X
+            })
+
+    # Convert to DataFrames
+    df_x = pd.DataFrame(x_results)
+    df_y = pd.DataFrame(y_results)
+
+    # Save to Excel
+    file_name = f"decision_variables_alpha_{h}.xlsx"
+    with pd.ExcelWriter(file_name) as writer:
+        df_x.to_excel(writer, sheet_name="x_values", index=False)
+        df_y.to_excel(writer, sheet_name="y_values", index=False)
+
+    print(f"File saved: {file_name}")
