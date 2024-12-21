@@ -7,22 +7,22 @@ import matplotlib.pyplot as plt
 import openpyxl
 import os
 #find current working directory: print(os.getcwd())
-np.random.seed(42)
+np.random.seed(1)
 
 combined_file_name = "decision_variables_combined.xlsx"
 
-I = 20
+I = 10
 J = 40
-K = 50 #number of samples of points from each \xsi_j distribution (PDF).
-n = 2 #number in M, F, D
+K = 20 #number of samples of points from each \xsi_j distribution (PDF).
+n = 0 #number in M, F, D
 
 alpha_possibilities = [0.9, 0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99]
 
-M = [12.5, 17.5, 15, 15, 15, 15, 15, 15, 15, 15]
+M = [8, 17.5, 15, 15, 15, 15, 15, 15, 15, 15]
 M = [i * J for i in M]
-F = [500, 500, 250, 500, 750, 1000, 500, 500, 500, 500]
+F = [5, 500, 250, 500, 750, 1000, 500, 500, 500, 500]
 F = [i * J for i in F]
-D = [270, 270, 270, 270, 270, 270, 240, 300, 330, 210]
+D = [27000, 270, 270, 270, 270, 270, 240, 300, 330, 210]
 
 ### contraint 3 (individual chance constraint)
 mu = {}
@@ -59,8 +59,8 @@ for k in range(len(largest_3_loc_demand)):
     low_first_coordinate = largest_3_loc_demand[k][0] - 5
     high_second_coordinate = largest_3_loc_demand[k][1] + 5
     low_second_coordinate = largest_3_loc_demand[k][1] - 5
-    loc_facility_near_high_mu += [(int(np.random.uniform(low_first_coordinate, high_first_coordinate)),
-                                  int(np.random.uniform(low_second_coordinate, high_second_coordinate)))]
+    loc_facility_near_high_mu += [(abs(int(np.random.uniform(low_first_coordinate, high_first_coordinate))),
+                                  abs(int(np.random.uniform(low_second_coordinate, high_second_coordinate))))]
 
 loc_facility_the_rest = []
 for k in range(I-3):
@@ -142,7 +142,7 @@ with pd.ExcelWriter(combined_file_name, engine='openpyxl') as writer:
 
 
         # Collect x[i] values along with alpha
-        x_results = [{'x[i]': x[i].X, 'alpha': alpha_possibilities[h]} for i in range(I)]
+        x_results = [{'i': i, 'x[i]': x[i].X, 'alpha': alpha_possibilities[h]} for i in range(I)]
 
         # Collect y[i, j] values
         y_results = [
@@ -161,4 +161,17 @@ with pd.ExcelWriter(combined_file_name, engine='openpyxl') as writer:
         df_y.to_excel(writer, sheet_name=sheet_name_y, index=False)
 
         print(f"Added sheets for alpha_{alpha_possibilities[h]}")
+
+    df_object = pd.DataFrame(objectfunctions_for_all_alpha)
+    df_object.to_excel(writer, sheet_name='objectvalue', index=False)
+
+    loc_facility_results = [{'i': i, 'loc': loc_facility[i]} for i in range(I)]
+    loc_demand_results = [{'j': j, 'loc': loc_demand[j]} for j in range(J)]
+
+    df_object = pd.DataFrame(loc_facility_results)
+    df_object.to_excel(writer, sheet_name='loc_facility', index=False)
+
+    df_object = pd.DataFrame(loc_demand_results)
+    df_object.to_excel(writer, sheet_name='loc_demand', index=False)
+
 print(f"Combined file saved: {combined_file_name}")
