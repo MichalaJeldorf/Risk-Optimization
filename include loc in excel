@@ -1,0 +1,10 @@
+    loc_facility_results = [{'i': i, 'loc_fac_a': fac_a[i], 'loc_fac_b': fac_b[i]} for i in range(n_facilities)]
+    loc_demand_results = [{'j': j, 'loc_demand_a': cust_a[j], 'loc_demand_b': cust_b[j]} for j in range(n_customers)]
+
+    df_object = pd.DataFrame(loc_facility_results)
+    df_object.to_excel(writer, sheet_name='loc_facility', index=False)
+
+    df_object = pd.DataFrame(loc_demand_results)
+    df_object.to_excel(writer, sheet_name='loc_demand', index=False) 
+
+print(f"Combined file saved: {combined_file_name}")
