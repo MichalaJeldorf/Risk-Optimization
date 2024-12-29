@@ -1,0 +1,164 @@
+import numpy as np
+from gurobipy import *
+from scipy.stats import truncnorm
+import pandas as pd
+import gurobipy as gp
+from gurobipy import GRB
+import matplotlib.pyplot as plt
+
+n_customers = 100  # |J|
+n_facilities = 30  # |I|
+n_outcomes = 100  # |K| #set to 100 instead of 1000 to make the code run faster
+
+#F and C are from config1. M has been changed
+M = 6*n_customers
+F = 500*n_customers
+D = 270
+
+np.random.seed(1)
+
+# Define alpha values to test
+alpha_values = np.arange(0.8, 1.0, 0.01)  # From 0.8 to 0.99 in steps of 0.01
+
+
+mu = {(j): np.random.uniform(10,50) for j in range(n_customers)}
+sigma = {(j): np.random.uniform(0.05*mu[j],0.35*mu[j]) for j in range(n_customers)}
+
+cust_largest = sorted(mu, key = mu.get, reverse = True)[:3]
+
+cust_a = {(j): np.random.uniform(0, 100) for j in range(n_customers)}
+cust_b = {(j): np.random.uniform(0, 100) for j in range(n_customers)}
+
+customer_coord = {(j): (cust_a[j], cust_b[j]) for j in range(n_customers)}
+
+cust_largest_a = [cust_a[i] for i in cust_largest]
+cust_largest_b = [cust_b[i] for i in cust_largest]
+
+fac_a_largest = {(i): np.random.uniform(cust_largest_a[i]- 5, cust_largest_a[i]+ 5) for i in range(3)}
+fac_b_largest = {(i): np.random.uniform(cust_largest_b[i]- 5, cust_largest_b[i]+ 5) for i in range(3)}
+
+fac_a_rest = {(i): np.random.uniform(20, 80) for i in range(3, n_facilities)}
+fac_b_rest = {(i): np.random.uniform(20, 80) for i in range(3, n_facilities)}
+
+fac_a = fac_a_largest| fac_a_rest
+fac_b = fac_b_largest| fac_b_rest
+
+def euc_dist(i, j):
+    return np.sqrt((fac_a[i] - cust_a[j])**2 + (fac_b[i] - cust_b[j])**2)
+
+dist = {(i,j): euc_dist(i,j) for i in range(n_facilities) for j in range(n_customers)}
+
+C = {(i,j): D* dist[i,j] for i in range(n_facilities) for j in range(n_customers)}
+
+def generate_demand(mu, sigma, size=n_outcomes):
+    demand_outcome = {}
+    for j in mu.keys():
+        lower_bound = mu[j] - 4/5*mu[j]
+        upper_bound = mu[j] + 4/5*mu[j]
+        a = (lower_bound - mu[j]) / sigma[j]
+        b = (upper_bound - mu[j]) / sigma[j]
+        demand_outcome[j] = truncnorm.rvs(a, b, loc = mu[j], scale = sigma[j], size = size)
+    return demand_outcome
+
+demand_outcomes = generate_demand(mu, sigma, size = n_outcomes)
+
+xi = {(j,k): demand_outcomes[j][k] for j in range(n_customers) for k in range(n_outcomes)}
+
+B = 1e6 #arbitrarily large constant
+
+pi = {(k): 1/n_outcomes for k in range(n_outcomes)}
+
+# Lists to store results
+num_open_facilities = []  # Stores the number of open facilities for each alpha
+num_connections = []  # Stores the number of connections for each alpha
+# Initialize lists to store connection data for plotting
+connection_data = []
+obj_values = []  # Stores the objective function values for each alpha
+
+for alpha in alpha_values:
+    print(f"Solving for alpha = {alpha}...")
+
+    # Initialize the model as before
+    model = gp.Model("FacilityProblem")
+
+    x = model.addVars(n_facilities, vtype=GRB.BINARY, name="x")
+    y = model.addVars(n_facilities, n_customers, vtype=GRB.BINARY, name="y")
+    gamma = model.addVars(n_facilities, n_outcomes, vtype=GRB.BINARY, name="gamma")
+
+    model.setObjective(
+        quicksum(x[i] * F for i in range(n_facilities)) +
+        quicksum(C[i, j] * y[i, j] for i in range(n_facilities) for j in range(n_customers)),
+        GRB.MINIMIZE
+    )
+
+    # Constraints
+    model.addConstrs((y[i, j] <= x[i] for i in range(n_facilities) for j in range(n_customers)), "c1")
+    model.addConstrs((quicksum(y[i, j] for i in range(n_facilities)) == 1 for j in range(n_customers)), "c2")
+    model.addConstrs((quicksum(xi[j, k] * y[i, j] for j in range(n_customers)) <= M * x[i] + B * (1 - gamma[i, k])
+                      for k in range(n_outcomes) for i in range(n_facilities)), "c3")
+    model.addConstrs((quicksum(pi[k] * gamma[i, k] for k in range(n_outcomes)) >= alpha for i in range(n_facilities)),
+                     "c4")
+
+    model.optimize()
+
+    if model.status == GRB.OPTIMAL:
+        print(f"Alpha = {alpha}, Optimal solution found.")
+        obj_values.append(model.objVal)  # Save the objective function value
+        print(f"Alpha = {alpha}, Objective Value = {model.objVal}")
+
+        # Extract the locations of open connections (y[i, j] = 1)
+        for i in range(n_facilities):
+            for j in range(n_customers):
+                if y[i, j].X > 0.5:  # If connection is open
+                    connection_data.append({
+                        "alpha": alpha,
+                        "facility_x": fac_a[i],
+                        "facility_y": fac_b[i],
+                        "customer_x": cust_a[j],
+                        "customer_y": cust_b[j]
+                    })
+    else:
+        print(f"Model not solved for alpha = {alpha}.")
+        obj_values.append(None)  # Append None if no solution is found
+        print(f"Model not solved for alpha = {alpha}.")
+
+    open_facilities = [i for i in range(n_facilities) if x[i].X > 0.5]
+    print(f"Alpha = {alpha}, Open Facilities: {open_facilities}")
+
+# Convert connection data to a DataFrame
+df_connections = pd.DataFrame(connection_data)
+
+# Plotting the connections
+plt.figure(figsize=(10, 8))
+scatter = plt.scatter(
+    df_connections["facility_x"],
+    df_connections["facility_y"],
+    c=df_connections["alpha"],
+    cmap="viridis",
+    s=50,  # Size of the dots
+    label="Open Connections"
+)
+plt.colorbar(scatter, label="Alpha (Confidence Level)")
+plt.xlabel("Facility X Coordinate")
+plt.ylabel("Facility Y Coordinate")
+plt.title("Location of Open Connections by Alpha")
+plt.grid(True)
+plt.show()
+
+# Plot the objective values
+plt.figure(figsize=(10, 5))
+plt.plot(alpha_values, obj_values, marker='o', label="Objective Function Value")
+plt.xlabel("Alpha (Confidence Level)")
+plt.ylabel("Objective Function Value")
+plt.title("Objective Function Value vs Alpha")
+plt.grid(True)
+plt.legend()
+plt.show()
+
+# Create a DataFrame to store the results
+df_obj = pd.DataFrame({"Alpha": alpha_values, "Objective Value": obj_values})
+
+# Save to a CSV file
+df_obj.to_csv("objective_function_values.csv", index=False)
+
+print("Objective function values saved to objective_function_values.csv.")
