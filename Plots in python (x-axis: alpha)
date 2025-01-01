@@ -6,19 +6,19 @@ import gurobipy as gp
 from gurobipy import GRB
 import matplotlib.pyplot as plt
 
+n_facilities = 40  # |I|
 n_customers = 100  # |J|
-n_facilities = 30  # |I|
-n_outcomes = 100  # |K| #set to 100 instead of 1000 to make the code run faster
+n_outcomes = 1000  # |K|
 
-#F and C are from config1. M has been changed
-M = 6*n_customers
+#M, F and C are from config1
+M = 12.5*n_customers
 F = 500*n_customers
 D = 270
 
 np.random.seed(1)
 
 # Define alpha values to test
-alpha_values = np.arange(0.8, 1.0, 0.01)  # From 0.8 to 0.99 in steps of 0.01
+alpha_values = np.arange(0.7, 1.0, 0.01)  # From 0.7 to 0.99 in steps of 0.01
 
 
 mu = {(j): np.random.uniform(10,50) for j in range(n_customers)}
@@ -53,8 +53,8 @@ C = {(i,j): D* dist[i,j] for i in range(n_facilities) for j in range(n_customers
 def generate_demand(mu, sigma, size=n_outcomes):
     demand_outcome = {}
     for j in mu.keys():
-        lower_bound = mu[j] - 4/5*mu[j]
-        upper_bound = mu[j] + 4/5*mu[j]
+        lower_bound = 0
+        upper_bound = np.inf
         a = (lower_bound - mu[j]) / sigma[j]
         b = (upper_bound - mu[j]) / sigma[j]
         demand_outcome[j] = truncnorm.rvs(a, b, loc = mu[j], scale = sigma[j], size = size)
@@ -64,7 +64,25 @@ demand_outcomes = generate_demand(mu, sigma, size = n_outcomes)
 
 xi = {(j,k): demand_outcomes[j][k] for j in range(n_customers) for k in range(n_outcomes)}
 
-B = 1e6 #arbitrarily large constant
+#B = 1e4 #arbitrarily large constant
+
+def compute_f(i, x, xi, k):
+    return sum(xi[j, k] * C[i, j] * x for j in range(n_customers))
+
+def compute_h(i, xi, k):
+    return M  # M is already scaled by n_customers
+
+B = {}
+for i in range(n_facilities):
+    for k in range(n_outcomes):
+        max_f_minus_h = float('-inf')
+        for x_val in [0, 1]:  # Binary x
+            f_val = compute_f(i, x_val, xi, k)
+            h_val = compute_h(i, xi, k)
+            max_f_minus_h = max(max_f_minus_h, f_val - h_val)
+        B[(i, k)] = max_f_minus_h
+
+print(B)
 
 pi = {(k): 1/n_outcomes for k in range(n_outcomes)}
 
@@ -94,7 +112,7 @@ for alpha in alpha_values:
     # Constraints
     model.addConstrs((y[i, j] <= x[i] for i in range(n_facilities) for j in range(n_customers)), "c1")
     model.addConstrs((quicksum(y[i, j] for i in range(n_facilities)) == 1 for j in range(n_customers)), "c2")
-    model.addConstrs((quicksum(xi[j, k] * y[i, j] for j in range(n_customers)) <= M * x[i] + B * (1 - gamma[i, k])
+    model.addConstrs((quicksum(xi[j, k] * y[i, j] for j in range(n_customers)) <= M * x[i] + B[(i, k)] * (1 - gamma[i, k])
                       for k in range(n_outcomes) for i in range(n_facilities)), "c3")
     model.addConstrs((quicksum(pi[k] * gamma[i, k] for k in range(n_outcomes)) >= alpha for i in range(n_facilities)),
                      "c4")
