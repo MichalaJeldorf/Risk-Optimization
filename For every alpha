@@ -1,177 +1,225 @@
-from gurobipy import *
 import numpy as np
-import pandas as pd
+from gurobipy import *
 from scipy.stats import truncnorm
-import heapq
+import pandas as pd
+import gurobipy as gp
+from gurobipy import GRB
 import matplotlib.pyplot as plt
-import openpyxl
 import os
-#find current working directory: print(os.getcwd())
+
+n_facilities = 20  # |I|
+n_customers = 70  # |J|
+n_outcomes = 500  # |K|
+
+#M, F and C are from config1
+M = 12.5*n_customers
+F = 750*n_customers
+D = 270
+
 np.random.seed(1)
 
-combined_file_name = "decision_variables_combined.xlsx"
+combined_file_name = "/Users/michalajeldorf/Desktop/RiskOptimization/decision_variables_for_every_alpha.xlsx"
 
-I = 10
-J = 40
-K = 20 #number of samples of points from each \xsi_j distribution (PDF).
-n = 0 #number in M, F, D
+# Define alpha values to test
+alpha_values = np.arange(0.8, 1.0, 0.05)  # From 0.7 to 0.99 in steps of 0.01
 
-alpha_possibilities = [0.9, 0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99]
+mu = {(j): np.random.uniform(10,50) for j in range(n_customers)}
+sigma = {(j): np.random.uniform(0.05*mu[j],0.35*mu[j]) for j in range(n_customers)}
 
-M = [8, 17.5, 15, 15, 15, 15, 15, 15, 15, 15]
-M = [i * J for i in M]
-F = [5, 500, 250, 500, 750, 1000, 500, 500, 500, 500]
-F = [i * J for i in F]
-D = [27000, 270, 270, 270, 270, 270, 240, 300, 330, 210]
+cust_largest = sorted(mu, key = mu.get, reverse = True)[:3]
 
-### contraint 3 (individual chance constraint)
-mu = {}
-ratio = {}
-sigma = {}
-a = {}
-b = {}
-xsi = {}
-lower = {}
-upper = {}
-C = {}
+cust_a = {(j): np.random.uniform(0, 100) for j in range(n_customers)}
+cust_b = {(j): np.random.uniform(0, 100) for j in range(n_customers)}
 
-xsi_samples = []  # list of J list with K samples in each list
-for j in range(J):
-    mu[j] = np.random.uniform(10, 50)
-    ratio[j] = np.random.uniform(0.05, 0.35)
-    sigma[j] = mu[j] * ratio[j]
-    lower[j] = mu[j] - 5
-    upper[j] = mu[j] + 5
-    a[j] = (lower[j] - mu[j]) / sigma[j]  # a,b standardized truncation points
-    b[j] = (upper[j] - mu[j]) / sigma[j]
-    xsi[j] = truncnorm(a[j], b[j], loc=mu[j], scale=sigma[j])  # distribution
-    xsi_samples.append(xsi[j].rvs(size=K))  # sample K points from each distribution xsi_j (rvs=>samples from pdf)
+customer_coord = {(j): (cust_a[j], cust_b[j]) for j in range(n_customers)}
 
-largest_keys = heapq.nlargest(3, mu, key=mu.get)
+cust_largest_a = [cust_a[i] for i in cust_largest]
+cust_largest_b = [cust_b[i] for i in cust_largest]
 
-loc_demand = [(int(np.random.uniform(0, 100)), int(np.random.uniform(0, 100))) for _ in range(J)]
+fac_a_largest = {(i): np.random.uniform(cust_largest_a[i]- 5, cust_largest_a[i]+ 5) for i in range(3)}
+fac_b_largest = {(i): np.random.uniform(cust_largest_b[i]- 5, cust_largest_b[i]+ 5) for i in range(3)}
 
-largest_3_loc_demand = [loc_demand[i] for i in largest_keys]
+fac_a_rest = {(i): np.random.uniform(20, 80) for i in range(3, n_facilities)}
+fac_b_rest = {(i): np.random.uniform(20, 80) for i in range(3, n_facilities)}
 
-loc_facility_near_high_mu = []
-for k in range(len(largest_3_loc_demand)):
-    high_first_coordinate = largest_3_loc_demand[k][0] + 5
-    low_first_coordinate = largest_3_loc_demand[k][0] - 5
-    high_second_coordinate = largest_3_loc_demand[k][1] + 5
-    low_second_coordinate = largest_3_loc_demand[k][1] - 5
-    loc_facility_near_high_mu += [(abs(int(np.random.uniform(low_first_coordinate, high_first_coordinate))),
-                                  abs(int(np.random.uniform(low_second_coordinate, high_second_coordinate))))]
+fac_a = fac_a_largest| fac_a_rest
+fac_b = fac_b_largest| fac_b_rest
 
-loc_facility_the_rest = []
-for k in range(I-3):
-    loc_facility_the_rest += [(int(np.random.uniform(20, 80)),
-                              int(np.random.uniform(20, 80)))]
+def euc_dist(i, j):
+    return np.sqrt((fac_a[i] - cust_a[j])**2 + (fac_b[i] - cust_b[j])**2)
 
-loc_facility = loc_facility_near_high_mu + loc_facility_the_rest
+dist = {(i,j): euc_dist(i,j) for i in range(n_facilities) for j in range(n_customers)}
 
-norm = []
-for i in range(I):
-    for j in range(J):
-        dist = np.sqrt((loc_demand[j][1] - loc_demand[j][0])**2 + (loc_facility[i][1]-loc_facility[i][0])**2)
-        norm.append(int(dist))
-C = [i*D[n] for i in norm]
+C = {(i,j): D* dist[i,j] for i in range(n_facilities) for j in range(n_customers)}
 
-#loc_demand = np.array(loc_demand)
-#loc_facility = np.array(loc_facility)
-#distances = np.sqrt(np.sum((loc_facility[:, None, :] - loc_demand[None, :, :]) ** 2, axis=2))
-#norm = distances.astype(int)
-#C = norm * D[n]
+def generate_demand(mu, sigma, size=n_outcomes):
+    demand_outcome = {}
+    for j in mu.keys():
+        lower_bound = 0
+        upper_bound = np.inf
+        a = (lower_bound - mu[j]) / sigma[j]
+        b = (upper_bound - mu[j]) / sigma[j]
+        demand_outcome[j] = truncnorm.rvs(a, b, loc = mu[j], scale = sigma[j], size = size)
+    return demand_outcome
 
-objectfunctions_for_all_alpha = []
+demand_outcomes = generate_demand(mu, sigma, size = n_outcomes)
+
+xi = {(j,k): demand_outcomes[j][k] for j in range(n_customers) for k in range(n_outcomes)}
+
+#B = 1e4 #arbitrarily large constant
+
+def compute_f(i, x, xi, k):
+    return sum(xi[j, k] * C[i, j] * x for j in range(n_customers))
+
+def compute_h(i, xi, k):
+    return M  # M is already scaled by n_customers
+
+B = {}
+for i in range(n_facilities):
+    for k in range(n_outcomes):
+        max_f_minus_h = float('-inf')
+        for x_val in [0, 1]:  # Binary x
+            f_val = compute_f(i, x_val, xi, k)
+            h_val = compute_h(i, xi, k)
+            max_f_minus_h = max(max_f_minus_h, f_val - h_val)
+        B[(i, k)] = max_f_minus_h
+
+print(B)
+
+pi = {(k): 1/n_outcomes for k in range(n_outcomes)}
+
+# Lists to store results
+num_open_facilities = []  # Stores the number of open facilities for each alpha
+num_connections = []  # Stores the number of connections for each alpha
+# Initialize lists to store connection data for plotting
+connection_data = []
+obj_values = []  # Stores the objective function values for each alpha
+
+x_results_all = []
+y_results_all = []
 
 with pd.ExcelWriter(combined_file_name, engine='openpyxl') as writer:
-    for h in range(len(alpha_possibilities)):
-        m = Model("example_model")
-        alpha = [alpha_possibilities[h]]*I #must have len = I
+    for alpha in alpha_values:
+        print(f"Solving for alpha = {alpha}...")
 
-        x = m.addVars(I,vtype=GRB.BINARY, name = "x")
-        y = m.addVars(I, J, vtype=GRB.BINARY, name = "y")
+        # Initialize the model as before
+        model = gp.Model("FacilityProblem")
 
-        ### constraint 1 (for every i,j)
-        m.addConstrs(
-            (y[i, j] <= x[i] for i in range(I) for j in range(J)),
-            name="c1")
+        x = model.addVars(n_facilities, vtype=GRB.BINARY, name="x")
+        y = model.addVars(n_facilities, n_customers, vtype=GRB.BINARY, name="y")
+        gamma = model.addVars(n_facilities, n_outcomes, vtype=GRB.BINARY, name="gamma")
 
-        ### constraint 2 (for every j)
-        m.addConstrs(
-            (quicksum(y[i, j] for i in range(I)) == 1 for j in range(J)),
-            name="c2")
+        model.setObjective(
+            quicksum(x[i] * F for i in range(n_facilities)) +
+            quicksum(C[i, j] * y[i, j] for i in range(n_facilities) for j in range(n_customers)),
+            GRB.MINIMIZE
+        )
 
-        #page 4 lecnotes 3
-        z = m.addVars(I, K, vtype=GRB.BINARY, name="z") #doesnt depend on j, since we sum over \xsi_j
-        #used in the chance constraint to control whether the demand for each facility is met for each sample
+        # Constraints
+        model.addConstrs((y[i, j] <= x[i] for i in range(n_facilities) for j in range(n_customers)), "c1")
+        model.addConstrs((quicksum(y[i, j] for i in range(n_facilities)) == 1 for j in range(n_customers)), "c2")
+        model.addConstrs((quicksum(xi[j, k] * y[i, j] for j in range(n_customers)) <= M * x[i] + B[(i, k)] * (1 - gamma[i, k])
+                          for k in range(n_outcomes) for i in range(n_facilities)), "c3")
+        model.addConstrs((quicksum(pi[k] * gamma[i, k] for k in range(n_outcomes)) >= alpha for i in range(n_facilities)),
+                         "c4")
 
-        M_i_k = 50000 #M_i_k should be greater or equal to the y_ij that maximises lhs - M[2]*x[i]
-        #Choose M_i_k great enough to effectively deactivate the constraint when zik=0 but not so large as to cause numerical instability or inefficiency in the solver.
+        model.optimize()
 
-        m.addConstrs(
-            (quicksum(xsi_samples[j][k] * y[i, j] for j in range(J))
-                <= M[n] * x[i] + M_i_k * (1 - z[i, k])
-                for i in range(I)
-                for k in range(K)),
-            name="c3a")
+        if model.status == GRB.OPTIMAL:
+            print(f"Alpha = {alpha:.2f}, Optimal solution found.")
+            obj_values.append(model.objVal)  # Save the objective function value
+            print(f"Alpha = {alpha:.2f}, Objective Value = {model.objVal}")
 
-        pi = 1/K #we assume the K samples of j all have same probability of happening (uniform probability of each sample)
-        #maybe change pi?
+            # Collect `x` values
+            x_results_all.extend([{'alpha': alpha, 'i': i, 'x[i]': x[i].X} for i in range(n_facilities)])
 
-        m.addConstrs(
-            (quicksum(pi * z[i, k] for k in range(K)) >= alpha[i] for i in range(I)),
-            name="c3b")
+            # Collect `y` values
+            y_results_all.extend([
+                {'alpha': alpha, 'i': i, 'j': j, 'y[i,j]': y[i, j].X}
+                for i in range(n_facilities) for j in range(n_customers)
+            ])
 
-        Fx = quicksum(F[n] * x[i] for i in range(I))
-        Cy = quicksum(C[i * J + j] * y[i, j] for i in range(I) for j in range(J))
+            # Extract the locations of open connections (y[i, j] = 1)
+            for i in range(n_facilities):
+                for j in range(n_customers):
+                    if y[i, j].X > 0.5:  # If connection is open
+                        connection_data.append({
+                            "alpha": alpha,
+                            "facility_x": fac_a[i],
+                            "facility_y": fac_b[i],
+                            "customer_x": cust_a[j],
+                            "customer_y": cust_b[j]
+                        })
+        else:
+            print(f"Model not solved for alpha = {alpha:.2f}.")
+            obj_values.append(None)  # Append None if no solution is found
+            print(f"Model not solved for alpha = {alpha:.2f}.")
 
-        objective_function = Fx + Cy
-
-        m.setObjective(objective_function, GRB.MINIMIZE)
-
-        m.update() #adding the stuff to the model
-
-        m.optimize() #solving the model
-
-        print('Objective value: %g' % m.objVal) #objective value
-
-        objectfunctions_for_all_alpha.append(m.objVal)
-
-        m.write("model.lp") #printing the model in a readable way. File arrives at /Users/michalajeldorf/Desktop/RiskOptimization
-
+        open_facilities = [i for i in range(n_facilities) if x[i].X > 0.5]
+        print(f"Alpha = {alpha:.2f}, Open Facilities: {open_facilities}")
 
         # Collect x[i] values along with alpha
-        x_results = [{'i': i, 'x[i]': x[i].X, 'alpha': alpha_possibilities[h]} for i in range(I)]
+        x_results = [{'i': i, 'x[i]': x[i].X, 'alpha': alpha} for i in range(n_facilities)]
 
         # Collect y[i, j] values
         y_results = [
-            {'alpha': alpha_possibilities[h], 'i': i, 'j': j, 'y[i,j]': y[i, j].X}
-            for i in range(I) for j in range(J)
+            {'alpha': alpha, 'i': i, 'j': j, 'y[i,j]': y[i, j].X}
+            for i in range(n_facilities) for j in range(n_customers)
         ]
 
-        # Convert to DataFrames
-        df_x = pd.DataFrame(x_results)
-        df_y = pd.DataFrame(y_results)
+    # Convert to DataFrames
+    df_x_all = pd.DataFrame(x_results_all)
+    df_y_all = pd.DataFrame(y_results_all)
 
-        sheet_name_x = f"x_values_alpha_{h}"
-        sheet_name_y = f"y_values_alpha_{h}"
-        # Write dataframes to their respective sheets in the same Excel file
-        df_x.to_excel(writer, sheet_name=sheet_name_x, index=False)
-        df_y.to_excel(writer, sheet_name=sheet_name_y, index=False)
+    # Pivot tables to create matrix format
+    x_pivot = df_x_all.pivot(index='i', columns='alpha', values='x[i]')
+    y_pivot = df_y_all.pivot_table(index=['i', 'j'], columns='alpha', values='y[i,j]')
 
-        print(f"Added sheets for alpha_{alpha_possibilities[h]}")
+    # Save to sheets
+    x_pivot.to_excel(writer, sheet_name='x_values', index=True)
+    y_pivot.to_excel(writer, sheet_name='y_values', index=True)
 
-    df_object = pd.DataFrame(objectfunctions_for_all_alpha)
+    df_object = pd.DataFrame(obj_values)
     df_object.to_excel(writer, sheet_name='objectvalue', index=False)
 
-    loc_facility_results = [{'i': i, 'loc': loc_facility[i]} for i in range(I)]
-    loc_demand_results = [{'j': j, 'loc': loc_demand[j]} for j in range(J)]
+    loc_facility_results = [{'i': i, 'loc_fac_a': fac_a[i], 'loc_fac_b': fac_b[i]} for i in range(n_facilities)]
+    loc_demand_results = [{'j': j, 'loc_demand_a': cust_a[j], 'loc_demand_b': cust_b[j], 'mu': mu[j]} for j in range(n_customers)]
 
-    df_object = pd.DataFrame(loc_facility_results)
-    df_object.to_excel(writer, sheet_name='loc_facility', index=False)
+    df_loc_facility = pd.DataFrame(loc_facility_results)
+    df_loc_facility.to_excel(writer, sheet_name='loc_facility', index=False)
 
-    df_object = pd.DataFrame(loc_demand_results)
-    df_object.to_excel(writer, sheet_name='loc_demand', index=False)
+    df_loc_demand = pd.DataFrame(loc_demand_results)
+    df_loc_demand.to_excel(writer, sheet_name='loc_demand', index=False)
 
 print(f"Combined file saved: {combined_file_name}")
+# Convert connection data to a DataFrame
+df_connections = pd.DataFrame(connection_data)
+
+# Plotting the connections
+plt.figure(figsize=(10, 8))
+scatter = plt.scatter(
+    df_connections["facility_x"],
+    df_connections["facility_y"],
+    c=df_connections["alpha"],
+    cmap="viridis",
+    s=50,  # Size of the dots
+    label="Open Connections"
+)
+plt.colorbar(scatter, label="Alpha (Confidence Level)")
+plt.xlabel("Facility X Coordinate")
+plt.ylabel("Facility Y Coordinate")
+plt.title(f"Location of Open Connections by Alpha for I={n_facilities}, J={n_customers}")
+plt.grid(True)
+plt.show()
+
+# Plot the objective values
+plt.figure(figsize=(10, 5))
+plt.plot(alpha_values, obj_values, marker='o', label="Objective Function Value")
+plt.xlabel("Alpha (Confidence Level)")
+plt.ylabel("Objective Function Value")
+plt.title(f"Objective Function Value vs Alpha for I={n_facilities}, J={n_customers}")
+plt.grid(True)
+plt.legend()
+plt.show()
+
+print("File saved in:", os.getcwd())
