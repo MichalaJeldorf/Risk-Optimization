@@ -1,0 +1,179 @@
+import numpy as np
+from gurobipy import *
+from scipy.stats import truncnorm
+import pandas as pd
+import gurobipy as gp
+from gurobipy import GRB
+import matplotlib.pyplot as plt
+import openpyxl
+
+n_facilities = 20  # |I|
+n_customers = 70  # |J|
+n_outcomes = 500  # |K|
+
+#M, F and C are from config1
+M = 8.5*n_customers
+F = 250*n_customers
+D = 330
+
+np.random.seed(1)
+
+# Define alpha values to test
+alpha_values = np.arange(0.85, 1.0, 0.05)  # From 0.7 to 0.99 in steps of 0.01
+
+
+mu = {(j): np.random.uniform(10,50) for j in range(n_customers)}
+sigma = {(j): np.random.uniform(0.05*mu[j],0.35*mu[j]) for j in range(n_customers)}
+
+cust_largest = sorted(mu, key = mu.get, reverse = True)[:3]
+
+cust_a = {(j): np.random.uniform(0, 100) for j in range(n_customers)}
+cust_b = {(j): np.random.uniform(0, 100) for j in range(n_customers)}
+
+customer_coord = {(j): (cust_a[j], cust_b[j]) for j in range(n_customers)}
+
+cust_largest_a = [cust_a[i] for i in cust_largest]
+cust_largest_b = [cust_b[i] for i in cust_largest]
+
+fac_a_largest = {(i): np.random.uniform(cust_largest_a[i]- 5, cust_largest_a[i]+ 5) for i in range(3)}
+fac_b_largest = {(i): np.random.uniform(cust_largest_b[i]- 5, cust_largest_b[i]+ 5) for i in range(3)}
+
+fac_a_rest = {(i): np.random.uniform(20, 80) for i in range(3, n_facilities)}
+fac_b_rest = {(i): np.random.uniform(20, 80) for i in range(3, n_facilities)}
+
+fac_a = fac_a_largest| fac_a_rest
+fac_b = fac_b_largest| fac_b_rest
+
+def euc_dist(i, j):
+    return np.sqrt((fac_a[i] - cust_a[j])**2 + (fac_b[i] - cust_b[j])**2)
+
+dist = {(i,j): euc_dist(i,j) for i in range(n_facilities) for j in range(n_customers)}
+
+C = {(i,j): D* dist[i,j] for i in range(n_facilities) for j in range(n_customers)}
+
+def generate_demand(mu, sigma, size=n_outcomes):
+    demand_outcome = {}
+    for j in mu.keys():
+        lower_bound = 0
+        upper_bound = np.inf
+        a = (lower_bound - mu[j]) / sigma[j]
+        b = (upper_bound - mu[j]) / sigma[j]
+        demand_outcome[j] = truncnorm.rvs(a, b, loc = mu[j], scale = sigma[j], size = size)
+    return demand_outcome
+
+demand_outcomes = generate_demand(mu, sigma, size = n_outcomes)
+
+xi = {(j,k): demand_outcomes[j][k] for j in range(n_customers) for k in range(n_outcomes)}
+
+#B = 1e4 #arbitrarily large constant
+
+def compute_f(i, x, xi, k):
+    return sum(xi[j, k] * C[i, j] * x for j in range(n_customers))
+
+def compute_h(i, xi, k):
+    return M  # M is already scaled by n_customers
+
+B = {}
+for i in range(n_facilities):
+    for k in range(n_outcomes):
+        max_f_minus_h = float('-inf')
+        for x_val in [0, 1]:  # Binary x
+            f_val = compute_f(i, x_val, xi, k)
+            h_val = compute_h(i, xi, k)
+            max_f_minus_h = max(max_f_minus_h, f_val - h_val)
+        B[(i, k)] = max_f_minus_h
+
+print(B)
+
+pi = {(k): 1/n_outcomes for k in range(n_outcomes)}
+
+# Lists to store results
+num_open_facilities = []  # Stores the number of open facilities for each alpha
+num_connections = []  # Stores the number of connections for each alpha
+# Initialize lists to store connection data for plotting
+connection_data = []
+obj_values = []  # Stores the objective function values for each alpha
+
+
+# Extract the locations of open connections (y[i, j] = 1) and generate separate plots for each alpha
+for alpha in alpha_values:
+    print(f"Solving for alpha = {alpha}...")
+
+    # Initialize the model as before
+    model = gp.Model("FacilityProblem")
+
+    x = model.addVars(n_facilities, vtype=GRB.BINARY, name="x")
+    y = model.addVars(n_facilities, n_customers, vtype=GRB.BINARY, name="y")
+    gamma = model.addVars(n_facilities, n_outcomes, vtype=GRB.BINARY, name="gamma")
+
+    model.setObjective(
+        quicksum(x[i] * F for i in range(n_facilities)) +
+        quicksum(C[i, j] * y[i, j] for i in range(n_facilities) for j in range(n_customers)),
+        GRB.MINIMIZE
+    )
+
+    # Constraints
+    model.addConstrs((y[i, j] <= x[i] for i in range(n_facilities) for j in range(n_customers)), "c1")
+    model.addConstrs((quicksum(y[i, j] for i in range(n_facilities)) == 1 for j in range(n_customers)), "c2")
+    model.addConstrs((quicksum(xi[j, k] * y[i, j] for j in range(n_customers)) <= M * x[i] + B[(i, k)] * (1 - gamma[i, k])
+                      for k in range(n_outcomes) for i in range(n_facilities)), "c3")
+    model.addConstrs((quicksum(pi[k] * gamma[i, k] for k in range(n_outcomes)) >= alpha for i in range(n_facilities)),
+                     "c4")
+
+    model.optimize()
+
+    if model.status == GRB.OPTIMAL:
+        print(f"Alpha = {alpha}, Optimal solution found.")
+        obj_values.append(model.objVal)  # Save the objective function value
+        print(f"Alpha = {alpha}, Objective Value = {model.objVal}")
+
+        # Extract the locations of open connections (y[i, j] = 1)
+        connection_data = []  # Reset connection data for this alpha
+        for i in range(n_facilities):
+            for j in range(n_customers):
+                if y[i, j].X > 0.5:  # If connection is open
+                    connection_data.append({
+                        "alpha": alpha,
+                        "facility_x": fac_a[i],
+                        "facility_y": fac_b[i],
+                        "customer_x": cust_a[j],
+                        "customer_y": cust_b[j]
+                    })
+
+        # Convert connection data to a DataFrame for this alpha
+        df_connections = pd.DataFrame(connection_data)
+
+        # Create a new figure for each alpha value
+        plt.figure(figsize=(12, 10))
+
+        # Loop through the connection data and plot lines between open facilities and customers
+        for index, row in df_connections.iterrows():
+            plt.plot([row["facility_x"], row["customer_x"]], [row["facility_y"], row["customer_y"]],
+                     color=plt.cm.viridis((row["alpha"] - 0.7) / 0.3), alpha=0.5)
+
+        # Optionally, scatter the facility and customer points for context
+        plt.scatter(fac_a.values(), fac_b.values(), color="red", label="Facilities", marker='^', s=100, edgecolor='black')
+        plt.scatter(cust_a.values(), cust_b.values(), color="blue", label="Customers", marker='o', s=50)
+
+        # Colorbar for alpha values
+        plt.colorbar(label="Alpha (Confidence Level)")
+
+        plt.xlabel("X Coordinate")
+        plt.ylabel("Y Coordinate")
+        plt.title(f"Connections Between Facilities and Customers for Alpha = {alpha}")
+        plt.legend()
+        plt.grid(True)
+
+        # Save the figure as a separate file for each alpha
+        plt.savefig(f"connections_alpha_{alpha:.2f}.png")
+        plt.close()  # Close the plot to avoid overlap in future plots
+    else:
+        print(f"Model not solved for alpha = {alpha}.")
+        obj_values.append(None)  # Append None if no solution is found
+        print(f"Model not solved for alpha = {alpha}.")
+
+    open_facilities = [i for i in range(n_facilities) if x[i].X > 0.5]
+    print(f"Alpha = {alpha}, Open Facilities: {open_facilities}")
+
+# Optionally, you can display a message after saving all plots
+print("Individual plots for each alpha have been saved.")
