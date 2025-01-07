@@ -6,22 +6,25 @@ import gurobipy as gp
 from gurobipy import GRB
 import matplotlib.pyplot as plt
 import os
+import time
 
-n_facilities = 20  # |I|
-n_customers = 70  # |J|
-n_outcomes = 500  # |K|
+n_facilities = 10  # |I|
+n_customers = 500  # |J|
+n_outcomes = 1000  # |K|
 
 #M, F and C are from config1
-M = 12.5*n_customers
-F = 750*n_customers
+m = 12.5
+f = 750
+M = m*n_customers
+F = f*n_customers
 D = 270
 
 np.random.seed(1)
 
-combined_file_name = "/Users/michalajeldorf/Desktop/RiskOptimization/decision_variables_for_every_alpha.xlsx"
+combined_file_name = "decision_variables_for_every_alpha.xlsx"
 
 # Define alpha values to test
-alpha_values = np.arange(0.8, 1.0, 0.05)  # From 0.7 to 0.99 in steps of 0.01
+alpha_values = np.arange(0.4, 1.0, 0.01)  # From 0.7 to 0.99 in steps of 0.01
 
 mu = {(j): np.random.uniform(10,50) for j in range(n_customers)}
 sigma = {(j): np.random.uniform(0.05*mu[j],0.35*mu[j]) for j in range(n_customers)}
@@ -56,7 +59,7 @@ def generate_demand(mu, sigma, size=n_outcomes):
     demand_outcome = {}
     for j in mu.keys():
         lower_bound = 0
-        upper_bound = np.inf
+        upper_bound = 1000
         a = (lower_bound - mu[j]) / sigma[j]
         b = (upper_bound - mu[j]) / sigma[j]
         demand_outcome[j] = truncnorm.rvs(a, b, loc = mu[j], scale = sigma[j], size = size)
@@ -84,8 +87,6 @@ for i in range(n_facilities):
             max_f_minus_h = max(max_f_minus_h, f_val - h_val)
         B[(i, k)] = max_f_minus_h
 
-print(B)
-
 pi = {(k): 1/n_outcomes for k in range(n_outcomes)}
 
 # Lists to store results
@@ -100,8 +101,6 @@ y_results_all = []
 
 with pd.ExcelWriter(combined_file_name, engine='openpyxl') as writer:
     for alpha in alpha_values:
-        print(f"Solving for alpha = {alpha}...")
-
         # Initialize the model as before
         model = gp.Model("FacilityProblem")
 
@@ -214,10 +213,10 @@ plt.show()
 
 # Plot the objective values
 plt.figure(figsize=(10, 5))
-plt.plot(alpha_values, obj_values, marker='o', label="Objective Function Value")
+plt.plot(alpha_values, obj_values, marker='o', label="Total cost")
 plt.xlabel("Alpha (Confidence Level)")
-plt.ylabel("Objective Function Value")
-plt.title(f"Objective Function Value vs Alpha for I={n_facilities}, J={n_customers}")
+plt.ylabel("Total cost")
+plt.title(f"Total cost per alpha for I={n_facilities}, J={n_customers}, K={n_outcomes}, M={m}, F={f}, D={D}")
 plt.grid(True)
 plt.legend()
 plt.show()
